@@ -27,7 +27,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 
 MAC_RE = re.compile(r"(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}")
@@ -39,6 +39,11 @@ class Device:
     mac: str
     hostname: str
     alive: bool
+    ping_ms: Optional[float]
+    open_ports: List[int]
+
+
+COMMON_PORTS: Tuple[int, ...] = (22, 53, 80, 139, 443, 445, 515, 548, 631, 9100, 1900, 3389)
 
 
 def run_command(command: List[str], timeout: float = 3.0) -> str:
@@ -61,8 +66,23 @@ def run_command(command: List[str], timeout: float = 3.0) -> str:
         return ""
 
 
-def ping_host(ip: str, timeout_ms: int) -> bool:
-    """Pinger en host én gang. Returnerer True ved svar."""
+def parse_ping_latency_ms(output: str) -> Optional[float]:
+    """Prøver å parse RTT/latency i millisekunder fra ping-output."""
+    for pattern in (
+        r"time[=<]?\s*([0-9]+(?:[.,][0-9]+)?)\s*ms",
+        r"avg[ =]+([0-9]+(?:[.,][0-9]+)?)",
+    ):
+        match = re.search(pattern, output, flags=re.IGNORECASE)
+        if match:
+            try:
+                return float(match.group(1).replace(",", "."))
+            except ValueError:
+                return None
+    return None
+
+
+def ping_host_info(ip: str, timeout_ms: int) -> Tuple[bool, Optional[float]]:
+    """Pinger en host én gang. Returnerer (alive, latency_ms)."""
     system = platform.system().lower()
 
     if system == "windows":
@@ -79,15 +99,37 @@ def ping_host(ip: str, timeout_ms: int) -> bool:
 
     # Treffer både engelsk og enkelte lokale varianter (best effort).
     if "ttl=" in lowered:
-        return True
+        return True, parse_ping_latency_ms(output)
     if "bytes from" in lowered:
-        return True
+        return True, parse_ping_latency_ms(output)
     if "reply from" in lowered:
-        return True
+        return True, parse_ping_latency_ms(output)
     if "1 received" in lowered or "1 packets received" in lowered:
-        return True
+        return True, parse_ping_latency_ms(output)
 
-    return False
+    return False, None
+
+
+def ping_host(ip: str, timeout_ms: int) -> bool:
+    """Kompatibilitetswrapper som returnerer kun alive."""
+    alive, _ = ping_host_info(ip, timeout_ms)
+    return alive
+
+
+def probe_open_ports(ip: str, ports: Tuple[int, ...] = COMMON_PORTS, timeout: float = 0.18) -> Set[int]:
+    """Sjekker et sett med vanlige porter og returnerer de som er åpne."""
+    open_ports: Set[int] = set()
+    for port in ports:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        try:
+            if sock.connect_ex((ip, port)) == 0:
+                open_ports.add(port)
+        except OSError:
+            pass
+        finally:
+            sock.close()
+    return open_ports
 
 
 def parse_arp_table() -> Dict[str, str]:
@@ -146,12 +188,15 @@ def scan_network(network: str, timeout_ms: int, workers: int) -> List[Device]:
     hosts = [str(ip) for ip in net.hosts()]
 
     alive_ips: List[str] = []
+    ping_ms_map: Dict[str, Optional[float]] = {}
     lock = threading.Lock()
 
     def worker(ip: str) -> None:
-        if ping_host(ip, timeout_ms=timeout_ms):
+        alive, latency_ms = ping_host_info(ip, timeout_ms=timeout_ms)
+        if alive:
             with lock:
                 alive_ips.append(ip)
+                ping_ms_map[ip] = latency_ms
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         list(executor.map(worker, hosts))
@@ -160,13 +205,28 @@ def scan_network(network: str, timeout_ms: int, workers: int) -> List[Device]:
     arp = parse_arp_table()
 
     devices: List[Device] = []
-    for ip in sorted(alive_ips, key=lambda x: tuple(int(p) for p in x.split("."))):
+    sorted_alive_ips = sorted(alive_ips, key=lambda x: tuple(int(p) for p in x.split(".")))
+
+    open_ports_map: Dict[str, List[int]] = {}
+
+    def port_worker(ip: str) -> None:
+        open_ports = sorted(probe_open_ports(ip))
+        with lock:
+            open_ports_map[ip] = open_ports
+
+    if sorted_alive_ips:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, len(sorted_alive_ips))) as executor:
+            list(executor.map(port_worker, sorted_alive_ips))
+
+    for ip in sorted_alive_ips:
         devices.append(
             Device(
                 ip=ip,
                 mac=arp.get(ip, ""),
                 hostname=resolve_hostname(ip),
                 alive=True,
+                ping_ms=ping_ms_map.get(ip),
+                open_ports=open_ports_map.get(ip, []),
             )
         )
 
@@ -186,18 +246,22 @@ def print_devices(devices: List[Device], elapsed: float, network: str) -> None:
     ip_w = max(len("IP"), *(len(d.ip) for d in devices))
     mac_w = max(len("MAC"), *(len(d.mac) for d in devices))
     host_w = max(len("Hostname"), *(len(d.hostname) for d in devices))
+    ping_w = max(len("Ping (ms)"), *(len(f"{d.ping_ms:.2f}") if d.ping_ms is not None else 1 for d in devices))
+    ports_w = max(len("Open Ports"), *(len(",".join(str(p) for p in d.open_ports)) if d.open_ports else 1 for d in devices))
 
-    header = f"{'IP':<{ip_w}}  {'MAC':<{mac_w}}  {'Hostname':<{host_w}}"
+    header = f"{'IP':<{ip_w}}  {'MAC':<{mac_w}}  {'Hostname':<{host_w}}  {'Ping (ms)':<{ping_w}}  {'Open Ports':<{ports_w}}"
     print(header)
     print("-" * len(header))
 
     for d in devices:
-        print(f"{d.ip:<{ip_w}}  {d.mac:<{mac_w}}  {d.hostname:<{host_w}}")
+        ping_text = f"{d.ping_ms:.2f}" if d.ping_ms is not None else "-"
+        ports_text = ",".join(str(p) for p in d.open_ports) if d.open_ports else "-"
+        print(f"{d.ip:<{ip_w}}  {d.mac:<{mac_w}}  {d.hostname:<{host_w}}  {ping_text:<{ping_w}}  {ports_text:<{ports_w}}")
 
 
 def save_csv(devices: List[Device], path: str) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["ip", "mac", "hostname", "alive"])
+        writer = csv.DictWriter(f, fieldnames=["ip", "mac", "hostname", "alive", "ping_ms", "open_ports"])
         writer.writeheader()
         for d in devices:
             writer.writerow(
@@ -206,6 +270,8 @@ def save_csv(devices: List[Device], path: str) -> None:
                     "mac": d.mac,
                     "hostname": d.hostname,
                     "alive": d.alive,
+                    "ping_ms": f"{d.ping_ms:.2f}" if d.ping_ms is not None else "",
+                    "open_ports": ",".join(str(p) for p in d.open_ports),
                 }
             )
 

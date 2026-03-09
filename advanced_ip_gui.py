@@ -8,15 +8,14 @@ import csv
 import ipaddress
 import platform
 import queue
-import socket
 import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass
 from tkinter import filedialog, messagebox, ttk
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
-from netscanner import detect_default_network, parse_arp_table, ping_host, resolve_hostname
+from netscanner import detect_default_network, parse_arp_table, ping_host_info, probe_open_ports, resolve_hostname
 
 
 @dataclass
@@ -26,9 +25,8 @@ class DeviceRow:
     hostname: str = ""
     device_type: str = "Unknown"
     status: str = "Alive"
-
-
-COMMON_PORTS = (80, 443, 445, 3389, 22, 139, 548, 515, 631, 9100, 53, 1900)
+    ping_ms: str = "-"
+    open_ports: str = "-"
 OUI_DEVICE_HINTS = {
     "00:1a:11": "Router/Network",
     "00:1d:7e": "Router/Network",
@@ -64,22 +62,7 @@ OUI_DEVICE_HINTS = {
 }
 
 
-def probe_open_ports(ip: str, timeout: float = 0.18) -> set[int]:
-    open_ports: set[int] = set()
-    for port in COMMON_PORTS:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        try:
-            if sock.connect_ex((ip, port)) == 0:
-                open_ports.add(port)
-        except OSError:
-            pass
-        finally:
-            sock.close()
-    return open_ports
-
-
-def classify_device(ip: str, mac: str, hostname: str) -> str:
+def classify_device(mac: str, hostname: str, ports: Set[int]) -> str:
     host_l = hostname.lower()
     mac_prefix = mac.lower().replace("-", ":")[0:8] if mac else ""
 
@@ -99,7 +82,6 @@ def classify_device(ip: str, mac: str, hostname: str) -> str:
     if mac_prefix in OUI_DEVICE_HINTS:
         return OUI_DEVICE_HINTS[mac_prefix]
 
-    ports = probe_open_ports(ip)
     if 9100 in ports or 631 in ports or 515 in ports:
         return "Printer"
     if 445 in ports or 3389 in ports or 139 in ports:
@@ -154,8 +136,8 @@ class ScannerApp:
 
         bg = "#ECECEC" if is_mac else "#F2F2F2"
         toolbar_bg = "#E3E3E3" if is_mac else "#E8E8E8"
-        table_bg = "#FFFFFF"
-        alt_bg = "#F7F9FC"
+        table_bg = "#12161C"
+        alt_bg = "#1A212A"
         font = "SF Pro Text" if is_mac else "Segoe UI"
 
         self.root.configure(background=bg)
@@ -170,13 +152,18 @@ class ScannerApp:
             font=(font, 12),
             background=table_bg,
             fieldbackground=table_bg,
-            foreground="#111111",
+            foreground="#F2F5F8",
         )
-        self.style.configure("Treeview.Heading", font=(font, 12, "bold"), foreground="#111111")
+        self.style.configure(
+            "Treeview.Heading",
+            font=(font, 12, "bold"),
+            foreground="#F2F5F8",
+            background="#242D38",
+        )
         self.style.map(
             "Treeview",
-            foreground=[("selected", "#111111"), ("!selected", "#111111")],
-            background=[("selected", "#DDE8FF"), ("!selected", table_bg)],
+            foreground=[("selected", "#FFFFFF"), ("!selected", "#F2F5F8")],
+            background=[("selected", "#2E5D97"), ("!selected", table_bg)],
         )
 
         self.table_bg = table_bg
@@ -186,37 +173,42 @@ class ScannerApp:
         frame = ttk.Frame(self.root, padding=12, style="App.TFrame")
         frame.pack(fill=tk.BOTH, expand=True)
 
-        controls = ttk.Frame(frame, style="Toolbar.TFrame", padding=(12, 10))
-        controls.pack(fill=tk.X, pady=(0, 10))
+        self.controls = ttk.Frame(frame, style="Toolbar.TFrame", padding=(12, 10))
+        self.controls.pack(fill=tk.X, pady=(0, 10))
 
-        ttk.Label(controls, text="Network (CIDR):", style="Toolbar.TLabel").grid(
+        ttk.Label(self.controls, text="Network (CIDR):", style="Toolbar.TLabel").grid(
             row=0, column=0, sticky=tk.W, padx=(0, 8), pady=4
         )
         self.network_var = tk.StringVar(value=detect_default_network() or "192.168.1.0/24")
-        self.network_entry = ttk.Entry(controls, textvariable=self.network_var, width=24)
+        self.network_entry = ttk.Entry(self.controls, textvariable=self.network_var, width=24)
         self.network_entry.grid(row=0, column=1, sticky=tk.W, pady=4)
 
-        ttk.Label(controls, text="Timeout (ms):", style="Toolbar.TLabel").grid(
+        ttk.Label(self.controls, text="Timeout (ms):", style="Toolbar.TLabel").grid(
             row=0, column=2, sticky=tk.W, padx=(18, 8), pady=4
         )
         self.timeout_var = tk.StringVar(value="600")
-        ttk.Entry(controls, textvariable=self.timeout_var, width=8).grid(row=0, column=3, sticky=tk.W, pady=4)
+        ttk.Entry(self.controls, textvariable=self.timeout_var, width=8).grid(row=0, column=3, sticky=tk.W, pady=4)
 
-        ttk.Label(controls, text="Workers:", style="Toolbar.TLabel").grid(row=0, column=4, sticky=tk.W, padx=(18, 8), pady=4)
+        ttk.Label(self.controls, text="Workers:", style="Toolbar.TLabel").grid(
+            row=0, column=4, sticky=tk.W, padx=(18, 8), pady=4
+        )
         self.workers_var = tk.StringVar(value="128")
-        ttk.Entry(controls, textvariable=self.workers_var, width=8).grid(row=0, column=5, sticky=tk.W, pady=4)
+        ttk.Entry(self.controls, textvariable=self.workers_var, width=8).grid(row=0, column=5, sticky=tk.W, pady=4)
 
-        button_frame = ttk.Frame(controls)
-        button_frame.grid(row=0, column=6, sticky=tk.E, padx=(20, 0))
+        self.button_frame = ttk.Frame(self.controls)
+        self.button_frame.grid(row=0, column=6, sticky=tk.E, padx=(20, 0))
 
-        self.scan_btn = ttk.Button(button_frame, text="Scan", command=self.start_scan)
+        self.scan_btn = ttk.Button(self.button_frame, text="Scan", command=self.start_scan)
         self.scan_btn.pack(side=tk.LEFT, padx=(0, 6))
 
-        self.stop_btn = ttk.Button(button_frame, text="Stop", command=self.stop_scan, state=tk.DISABLED)
+        self.stop_btn = ttk.Button(self.button_frame, text="Stop", command=self.stop_scan, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, padx=(0, 6))
 
-        self.export_btn = ttk.Button(button_frame, text="Export CSV", command=self.export_csv, state=tk.DISABLED)
+        self.export_btn = ttk.Button(self.button_frame, text="Export CSV", command=self.export_csv, state=tk.DISABLED)
         self.export_btn.pack(side=tk.LEFT)
+
+        self.controls.columnconfigure(6, weight=1)
+        self.controls.bind("<Configure>", self._on_controls_resize)
 
         status_frame = ttk.Frame(frame)
         status_frame.pack(fill=tk.X, pady=(10, 6))
@@ -230,19 +222,23 @@ class ScannerApp:
         table_frame = ttk.Frame(frame)
         table_frame.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
 
-        columns = ("status", "ip", "mac", "hostname", "device_type")
+        columns = ("status", "ip", "mac", "hostname", "ping_ms", "open_ports", "device_type")
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings")
         self.tree.heading("status", text="Status")
         self.tree.heading("ip", text="IP")
         self.tree.heading("mac", text="MAC")
         self.tree.heading("hostname", text="Hostname")
+        self.tree.heading("ping_ms", text="Ping (ms)")
+        self.tree.heading("open_ports", text="Open Ports")
         self.tree.heading("device_type", text="Device Type")
 
         self.tree.column("status", width=90, anchor=tk.W)
         self.tree.column("ip", width=165, anchor=tk.W)
-        self.tree.column("mac", width=210, anchor=tk.W)
-        self.tree.column("hostname", width=290, anchor=tk.W)
-        self.tree.column("device_type", width=190, anchor=tk.W)
+        self.tree.column("mac", width=190, anchor=tk.W)
+        self.tree.column("hostname", width=240, anchor=tk.W)
+        self.tree.column("ping_ms", width=100, anchor=tk.W)
+        self.tree.column("open_ports", width=210, anchor=tk.W)
+        self.tree.column("device_type", width=170, anchor=tk.W)
 
         yscroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.tree.yview)
         xscroll = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
@@ -256,6 +252,14 @@ class ScannerApp:
 
         table_frame.rowconfigure(0, weight=1)
         table_frame.columnconfigure(0, weight=1)
+
+    def _on_controls_resize(self, event: tk.Event) -> None:
+        # Move action buttons to a second row on narrow widths so controls stay visible.
+        narrow = event.width < 980
+        if narrow:
+            self.button_frame.grid_configure(row=1, column=0, columnspan=7, sticky=tk.W, padx=(0, 0), pady=(6, 0))
+        else:
+            self.button_frame.grid_configure(row=0, column=6, columnspan=1, sticky=tk.E, padx=(20, 0), pady=(0, 0))
 
     def start_scan(self) -> None:
         if self.scan_running:
@@ -304,7 +308,10 @@ class ScannerApp:
             return
 
         with open(path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=["ip", "mac", "hostname", "device_type", "status"])
+            writer = csv.DictWriter(
+                f,
+                fieldnames=["ip", "mac", "hostname", "ping_ms", "open_ports", "device_type", "status"],
+            )
             writer.writeheader()
             for row in sorted(self.results.values(), key=lambda d: tuple(int(p) for p in d.ip.split("."))):
                 writer.writerow(
@@ -312,6 +319,8 @@ class ScannerApp:
                         "ip": row.ip,
                         "mac": row.mac,
                         "hostname": row.hostname,
+                        "ping_ms": row.ping_ms,
+                        "open_ports": row.open_ports,
                         "device_type": row.device_type,
                         "status": row.status,
                     }
@@ -323,33 +332,34 @@ class ScannerApp:
         started = time.time()
         net = ipaddress.ip_network(network, strict=False)
         hosts = [str(ip) for ip in net.hosts()]
-        total = len(hosts)
-        processed = 0
+        total_hosts = len(hosts)
+        processed_hosts = 0
         alive: List[str] = []
 
-        self.ui_queue.put(("progress_setup", total))
+        self.ui_queue.put(("progress_setup",))
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            future_to_ip = {executor.submit(ping_host, ip, timeout_ms): ip for ip in hosts}
+            future_to_ip = {executor.submit(ping_host_info, ip, timeout_ms): ip for ip in hosts}
 
             for future in concurrent.futures.as_completed(future_to_ip):
                 if self.stop_event.is_set():
                     break
 
                 ip = future_to_ip[future]
-                processed += 1
+                processed_hosts += 1
 
                 is_alive = False
+                latency_ms: Optional[float] = None
                 try:
-                    is_alive = future.result()
+                    is_alive, latency_ms = future.result()
                 except Exception:
                     is_alive = False
 
-                self.ui_queue.put(("progress", processed, total))
+                self.ui_queue.put(("progress", "ping", processed_hosts, total_hosts))
 
                 if is_alive:
                     alive.append(ip)
-                    self.ui_queue.put(("row_alive", ip))
+                    self.ui_queue.put(("row_alive", ip, latency_ms))
 
             if self.stop_event.is_set():
                 for future in future_to_ip:
@@ -357,11 +367,19 @@ class ScannerApp:
 
         if not self.stop_event.is_set() and alive:
             arp = parse_arp_table()
+            total_details = len(alive)
+            processed_details = 0
             for ip in alive:
+                if self.stop_event.is_set():
+                    break
                 mac = arp.get(ip, "")
                 hostname = resolve_hostname(ip)
-                device_type = classify_device(ip, mac, hostname)
-                self.ui_queue.put(("row_update", ip, mac, hostname, device_type))
+                ports = probe_open_ports(ip)
+                ports_text = ",".join(str(p) for p in sorted(ports)) if ports else "-"
+                device_type = classify_device(mac, hostname, ports)
+                self.ui_queue.put(("row_update", ip, mac, hostname, ports_text, device_type))
+                processed_details += 1
+                self.ui_queue.put(("progress", "details", processed_details, total_details))
 
         elapsed = time.time() - started
         self.ui_queue.put(("scan_done", elapsed, self.stop_event.is_set()))
@@ -376,34 +394,46 @@ class ScannerApp:
             kind = event[0]
 
             if kind == "progress_setup":
-                total = event[1]
-                self.progress.configure(maximum=max(1, total), value=0)
+                self.progress.configure(maximum=100, value=0)
             elif kind == "progress":
-                processed, total = event[1], event[2]
-                self.progress.configure(maximum=max(1, total), value=processed)
-                self.status_var.set(f"Scanning... {processed}/{total}")
+                phase, processed, total = event[1], event[2], max(1, event[3])
+                ratio = min(1.0, processed / total)
+                if phase == "ping":
+                    progress_value = ratio * 70
+                    self.status_var.set(f"Pinging hosts... {processed}/{total}")
+                else:
+                    progress_value = 70 + (ratio * 30)
+                    self.status_var.set(f"Collecting host details... {processed}/{total}")
+                self.progress.configure(value=progress_value)
             elif kind == "row_alive":
-                ip = event[1]
-                row = DeviceRow(ip=ip)
+                ip, latency_ms = event[1], event[2]
+                ping_text = f"{latency_ms:.2f}" if latency_ms is not None else "-"
+                row = DeviceRow(ip=ip, ping_ms=ping_text)
                 self.results[ip] = row
                 tag = "even" if len(self.results) % 2 == 0 else "odd"
                 self.tree.insert(
                     "",
                     tk.END,
                     iid=ip,
-                    values=(row.status, row.ip, row.mac, row.hostname, row.device_type),
+                    values=(row.status, row.ip, row.mac, row.hostname, row.ping_ms, row.open_ports, row.device_type),
                     tags=(tag,),
                 )
             elif kind == "row_update":
-                ip, mac, hostname, device_type = event[1], event[2], event[3], event[4]
+                ip, mac, hostname, open_ports, device_type = event[1], event[2], event[3], event[4], event[5]
                 if ip in self.results:
                     self.results[ip].mac = mac
                     self.results[ip].hostname = hostname
+                    self.results[ip].open_ports = open_ports
                     self.results[ip].device_type = device_type
                     row = self.results[ip]
-                    self.tree.item(ip, values=(row.status, row.ip, row.mac, row.hostname, row.device_type))
+                    self.tree.item(
+                        ip,
+                        values=(row.status, row.ip, row.mac, row.hostname, row.ping_ms, row.open_ports, row.device_type),
+                    )
             elif kind == "scan_done":
                 elapsed, stopped = event[1], event[2]
+                if not stopped:
+                    self.progress.configure(value=100)
                 self.scan_running = False
                 self.scan_btn.configure(state=tk.NORMAL)
                 self.stop_btn.configure(state=tk.DISABLED)
