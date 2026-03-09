@@ -1,6 +1,6 @@
 # Network Scanner (GUI + CLI)
 
-## GUI (Advanced IP Scanner style)
+## GUI 
 
 Run:
 
