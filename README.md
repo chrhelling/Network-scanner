@@ -1,29 +1,33 @@
-# Nettverksskanner (GUI + CLI)
+# Network Scanner (GUI + CLI)
 
-## GUI (Advanced IP Scanner-lignende)
+## GUI (Advanced IP Scanner style)
 
-Kjør:
+Run:
 
 ```bash
 python3 advanced_ip_gui.py
 ```
 
-Funksjoner:
-- Skriv inn nettverk i CIDR (f.eks. `192.168.1.0/24`)
-- Start/Stop scan
-- Tabell med `IP`, `MAC`, `Hostname`, `Ping (ms)`, `Open Ports`, `Device Type`, `Status`
-- Progresjonslinje under scanning
-- Enhetstype-estimering (f.eks. Windows PC, Mac, Router/Modem, Printer)
-- Eksport til CSV (inkluderer `ping_ms` og `open_ports`)
+Features:
+- Enter network in CIDR format (for example `192.168.1.0/24`)
+- Start/Stop one-time scan
+- Start/Stop live scan (continuous monitoring for new and disappearing devices)
+- Table with `IP`, `MAC`, `Hostname`, `Ping (ms)`, `Open Ports`, `Device Type`, `Status`
+- Progress bar during scan
+- Device type estimation (for example Windows PC, Mac, Router/Modem, Printer)
+- CSV export (includes `ping_ms` and `open_ports`)
+- Live-mode visual highlighting:
+  - New devices: green fade animation
+  - Disappearing devices: red fade animation before removal
 
 ## CLI
 
-Kjør:
+Run:
 
 ```bash
 python3 netscanner.py --network 192.168.1.0/24 --csv devices.csv
 ```
 
-CLI-utskrift og CSV inneholder nå også:
-- `ping_ms` (responstid når tilgjengelig)
-- `open_ports` (kommaseparert liste med vanlige åpne porter)
+CLI output and CSV also include:
+- `ping_ms` (response time when available)
+- `open_ports` (comma-separated list of common open ports)
