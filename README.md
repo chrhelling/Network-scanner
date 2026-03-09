@@ -12,7 +12,8 @@ Features:
 - Enter network in CIDR format (for example `192.168.1.0/24`)
 - Start/Stop one-time scan
 - Start/Stop live scan (continuous monitoring for new and disappearing devices)
-- Table with `IP`, `MAC`, `Hostname`, `Ping (ms)`, `Open Ports`, `Device Type`, `Status`
+- Table with `IP`, `MAC`, `Nickname`, `Hostname`, `Ping (ms)`, `Open Ports`, `Device Type`, `Status`
+- Save device nicknames linked to MAC addresses (double-click `Nickname` cell or use `Set Nickname`) and reuse them automatically
 - Progress bar during scan
 - Device type estimation (for example Windows PC, Mac, Router/Modem, Printer)
 - CSV export (includes `ping_ms` and `open_ports`)
