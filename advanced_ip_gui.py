@@ -6,6 +6,7 @@ from __future__ import annotations
 import concurrent.futures
 import csv
 import ipaddress
+import json
 import math
 import os
 import platform
@@ -14,9 +15,10 @@ import re
 import threading
 import time
 import tkinter as tk
+from datetime import datetime
 from dataclasses import dataclass
 from tkinter import filedialog, messagebox, simpledialog, ttk
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from netscanner import (
     detect_default_network,
@@ -38,6 +40,8 @@ class DeviceRow:
     status: str = "Alive"
     ping_ms: str = "-"
     open_ports: str = "-"
+
+
 OUI_DEVICE_HINTS = {
     "00:1a:11": "Router/Network",
     "00:1d:7e": "Router/Network",
@@ -179,6 +183,15 @@ class ScannerApp:
         self.map_drag_key: Optional[str] = None
         self.alias_file = os.path.join(os.path.dirname(__file__), "mac_aliases.txt")
         self.mac_aliases: Dict[str, str] = {}
+        self.snapshot_history: List[Dict[str, Any]] = []
+        self.change_history: List[Dict[str, Any]] = []
+        self.last_snapshot_rows: Dict[str, DeviceRow] = {}
+        self.last_snapshot_source = ""
+        self.export_menu: Optional[tk.Menu] = None
+        self.search_var = tk.StringVar()
+        self.status_filter_var = tk.StringVar(value="All")
+        self.type_filter_var = tk.StringVar(value="All")
+        self.unknown_only_var = tk.BooleanVar(value=False)
         self._load_mac_aliases()
 
         self._configure_style()
@@ -190,57 +203,142 @@ class ScannerApp:
         self.style = ttk.Style(self.root)
         is_mac = platform.system().lower() == "darwin"
 
-        if is_mac:
-            try:
-                self.style.theme_use("aqua")
-            except tk.TclError:
-                pass
-        else:
-            try:
-                self.style.theme_use("clam")
-            except tk.TclError:
-                pass
+        try:
+            self.style.theme_use("clam")
+        except tk.TclError:
+            pass
 
-        bg = "#ECECEC" if is_mac else "#F2F2F2"
-        toolbar_bg = "#E3E3E3" if is_mac else "#E8E8E8"
-        table_bg = "#12161C"
-        alt_bg = "#1A212A"
+        bg = "#06080C"
+        panel_bg = "#10151C"
+        panel_bg_2 = "#161C24"
+        table_bg = "#0E1319"
+        alt_bg = "#131A22"
+        border = "#2A3440"
+        accent = "#7DC4FF"
+        accent_strong = "#53A7F5"
+        text = "#F5F8FC"
+        muted = "#AAB8C7"
         font = "SF Pro Text" if is_mac else "Segoe UI"
 
         self.root.configure(background=bg)
+        if is_mac:
+            try:
+                self.root.attributes("-alpha", 0.97)
+            except tk.TclError:
+                pass
 
         self.style.configure("App.TFrame", background=bg)
-        self.style.configure("Toolbar.TFrame", background=toolbar_bg)
-        self.style.configure("App.TLabel", background=bg, font=(font, 12))
-        self.style.configure("Toolbar.TLabel", background=toolbar_bg, font=(font, 12))
+        self.style.configure("Toolbar.TFrame", background=panel_bg)
+        self.style.configure("Surface.TFrame", background=panel_bg_2)
+        self.style.configure("App.TLabel", background=bg, foreground=text, font=(font, 12))
+        self.style.configure("Toolbar.TLabel", background=panel_bg, foreground=text, font=(font, 12))
+        self.style.configure("Status.TLabel", background=panel_bg_2, foreground=muted, font=(font, 11))
+        self.style.configure(
+            "TButton",
+            background=panel_bg_2,
+            foreground=text,
+            bordercolor=border,
+            lightcolor=border,
+            darkcolor=border,
+            padding=(12, 7),
+            font=(font, 11, "bold"),
+        )
+        self.style.configure(
+            "Accent.TButton",
+            background=accent_strong,
+            foreground="#FFFFFF",
+            bordercolor=accent,
+            lightcolor=accent,
+            darkcolor=accent,
+            padding=(12, 7),
+            font=(font, 11, "bold"),
+        )
+        self.style.map(
+            "TButton",
+            background=[("active", "#1B2330"), ("pressed", "#1F2834"), ("disabled", "#0D1117")],
+            foreground=[("disabled", "#6F8094")],
+        )
+        self.style.map(
+            "Accent.TButton",
+            background=[("active", "#68B8F8"), ("pressed", "#4199E9"), ("disabled", "#295B85")],
+            foreground=[("disabled", "#D5E6F6")],
+        )
+        self.style.configure(
+            "TEntry",
+            fieldbackground=panel_bg_2,
+            foreground=text,
+            insertcolor=text,
+            bordercolor=border,
+            lightcolor=border,
+            darkcolor=border,
+            padding=6,
+        )
+        self.style.configure(
+            "TCombobox",
+            fieldbackground=panel_bg_2,
+            foreground=text,
+            bordercolor=border,
+            lightcolor=border,
+            darkcolor=border,
+            arrowsize=14,
+            padding=5,
+        )
+        self.style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", panel_bg_2)],
+            selectbackground=[("readonly", panel_bg_2)],
+            selectforeground=[("readonly", text)],
+            foreground=[("readonly", text)],
+        )
+        self.style.configure(
+            "TCheckbutton",
+            background=panel_bg,
+            foreground=text,
+            font=(font, 11),
+        )
+        self.style.map("TCheckbutton", background=[("active", panel_bg)])
+        self.style.configure(
+            "Horizontal.TProgressbar",
+            background=accent_strong,
+            troughcolor=panel_bg,
+            bordercolor=border,
+            lightcolor=accent_strong,
+            darkcolor=accent_strong,
+        )
         self.style.configure(
             "Treeview",
-            rowheight=26,
+            rowheight=28,
             font=(font, 12),
             background=table_bg,
             fieldbackground=table_bg,
-            foreground="#F2F5F8",
+            foreground=text,
+            bordercolor=border,
         )
         self.style.configure(
             "Treeview.Heading",
             font=(font, 12, "bold"),
-            foreground="#F2F5F8",
-            background="#242D38",
+            foreground=text,
+            background=panel_bg_2,
+            bordercolor=border,
         )
         self.style.map(
             "Treeview",
             foreground=[("selected", "#FFFFFF")],
-            background=[("selected", "#2E5D97")],
+            background=[("selected", "#163B56")],
         )
 
         self.table_bg = table_bg
         self.table_alt_bg = alt_bg
+        self.panel_bg = panel_bg
+        self.panel_bg_2 = panel_bg_2
+        self.border = border
+        self.text_color = text
 
     def _build_ui(self) -> None:
         frame = ttk.Frame(self.root, padding=12, style="App.TFrame")
         frame.pack(fill=tk.BOTH, expand=True)
 
-        self.controls = ttk.Frame(frame, style="Toolbar.TFrame", padding=(12, 10))
+        self.controls = ttk.Frame(frame, style="Toolbar.TFrame", padding=(14, 12))
         self.controls.pack(fill=tk.X, pady=(0, 10))
 
         ttk.Label(self.controls, text="Network (CIDR):", style="Toolbar.TLabel").grid(
@@ -271,17 +369,17 @@ class ScannerApp:
         self.button_frame = ttk.Frame(self.controls)
         self.button_frame.grid(row=0, column=8, sticky=tk.E, padx=(20, 0))
 
-        self.scan_btn = ttk.Button(self.button_frame, text="Scan", command=self.start_scan)
+        self.scan_btn = ttk.Button(self.button_frame, text="Scan", command=self.start_scan, style="Accent.TButton")
         self.scan_btn.pack(side=tk.LEFT, padx=(0, 6))
 
         self.stop_btn = ttk.Button(self.button_frame, text="Stop", command=self.stop_scan, state=tk.DISABLED)
 
-        self.live_btn = ttk.Button(self.button_frame, text="Start Live", command=self.start_live_scan)
+        self.live_btn = ttk.Button(self.button_frame, text="Start Live", command=self.start_live_scan, style="Accent.TButton")
         self.live_btn.pack(side=tk.LEFT, padx=(0, 6))
 
         self.live_stop_btn = ttk.Button(self.button_frame, text="Stop Live", command=self.stop_live_scan, state=tk.DISABLED)
 
-        self.export_btn = ttk.Button(self.button_frame, text="Export CSV", command=self.export_csv, state=tk.DISABLED)
+        self.export_btn = ttk.Button(self.button_frame, text="Export", command=self.show_export_menu, state=tk.DISABLED)
         self.export_btn.pack(side=tk.LEFT)
         self.nickname_btn = ttk.Button(self.button_frame, text="Set Nickname", command=self.set_selected_nickname)
         self.nickname_btn.pack(side=tk.LEFT, padx=(6, 0))
@@ -292,16 +390,69 @@ class ScannerApp:
         self.controls.bind("<Configure>", self._on_controls_resize)
         self._refresh_action_buttons()
 
-        status_frame = ttk.Frame(frame)
+        self.filter_bar = ttk.Frame(frame, style="Toolbar.TFrame", padding=(14, 10))
+        self.filter_bar.pack(fill=tk.X, pady=(0, 10))
+        self.filter_bar.bind("<Configure>", self._on_filter_bar_resize)
+
+        self.search_label = ttk.Label(self.filter_bar, text="Search:", style="Toolbar.TLabel")
+        self.search_label.grid(row=0, column=0, sticky=tk.W, padx=(0, 8))
+        self.search_entry = ttk.Entry(self.filter_bar, textvariable=self.search_var, width=28)
+        self.search_entry.grid(row=0, column=1, sticky=tk.W, pady=2)
+        self.search_entry.bind("<KeyRelease>", lambda _event: self._apply_filters_to_tree())
+
+        self.status_label = ttk.Label(self.filter_bar, text="Status:", style="Toolbar.TLabel")
+        self.status_label.grid(row=0, column=2, sticky=tk.W, padx=(18, 8))
+        self.status_filter = ttk.Combobox(
+            self.filter_bar,
+            textvariable=self.status_filter_var,
+            values=("All", "Alive", "Offline"),
+            width=10,
+            state="readonly",
+        )
+        self.status_filter.grid(row=0, column=3, sticky=tk.W, pady=2)
+        self.status_filter.bind("<<ComboboxSelected>>", lambda _event: self._apply_filters_to_tree())
+
+        self.type_label = ttk.Label(self.filter_bar, text="Type:", style="Toolbar.TLabel")
+        self.type_label.grid(row=0, column=4, sticky=tk.W, padx=(18, 8))
+        self.type_filter = ttk.Combobox(
+            self.filter_bar,
+            textvariable=self.type_filter_var,
+            values=("All",),
+            width=20,
+            state="readonly",
+        )
+        self.type_filter.grid(row=0, column=5, sticky=tk.W, pady=2)
+        self.type_filter.bind("<<ComboboxSelected>>", lambda _event: self._apply_filters_to_tree())
+
+        self.unknown_only_check = ttk.Checkbutton(
+            self.filter_bar,
+            text="Only Unknown",
+            variable=self.unknown_only_var,
+            command=self._apply_filters_to_tree,
+        )
+        self.unknown_only_check.grid(row=0, column=6, sticky=tk.W, padx=(18, 8))
+
+        self.clear_filters_btn = ttk.Button(self.filter_bar, text="Clear Filters", command=self._clear_filters)
+        self.clear_filters_btn.grid(row=0, column=7, sticky=tk.W)
+
+        self.filter_summary_var = tk.StringVar(value="Showing 0 of 0 devices")
+        self.filter_summary_label = ttk.Label(self.filter_bar, textvariable=self.filter_summary_var, style="Toolbar.TLabel")
+        self.filter_summary_label.grid(
+            row=0, column=8, sticky=tk.E, padx=(18, 0)
+        )
+        self.filter_bar.columnconfigure(8, weight=1)
+        self.root.after_idle(self._refresh_filter_bar_layout)
+
+        status_frame = ttk.Frame(frame, style="Surface.TFrame", padding=(12, 10))
         status_frame.pack(fill=tk.X, pady=(10, 6))
 
         self.status_var = tk.StringVar(value="Ready")
-        ttk.Label(status_frame, textvariable=self.status_var, style="App.TLabel").pack(side=tk.LEFT)
+        ttk.Label(status_frame, textvariable=self.status_var, style="Status.TLabel").pack(side=tk.LEFT)
 
         self.progress = ttk.Progressbar(status_frame, orient=tk.HORIZONTAL, mode="determinate")
         self.progress.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(14, 0))
 
-        table_frame = ttk.Frame(frame)
+        table_frame = ttk.Frame(frame, style="Surface.TFrame", padding=(10, 10, 10, 8))
         table_frame.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
 
         columns = ("status", "ip", "mac", "nickname", "hostname", "ping_ms", "open_ports", "device_type")
@@ -327,9 +478,9 @@ class ScannerApp:
         yscroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.tree.yview)
         xscroll = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
         self.tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
-        self.tree.tag_configure("odd", background=self.table_bg)
-        self.tree.tag_configure("even", background=self.table_alt_bg)
-        self.tree.tag_configure("new_device", background="#1F4D2E", foreground="#F4FFF7")
+        self.tree.tag_configure("odd", background=self.table_bg, foreground=self.text_color)
+        self.tree.tag_configure("even", background=self.table_alt_bg, foreground=self.text_color)
+        self.tree.tag_configure("new_device", background="#163825", foreground="#EFFFF4")
         self.tree.bind("<Double-1>", self._on_tree_double_click)
 
         self.tree.grid(row=0, column=0, sticky="nsew")
@@ -346,6 +497,57 @@ class ScannerApp:
             self.button_frame.grid_configure(row=1, column=0, columnspan=9, sticky=tk.W, padx=(0, 0), pady=(6, 0))
         else:
             self.button_frame.grid_configure(row=0, column=8, columnspan=1, sticky=tk.E, padx=(20, 0), pady=(0, 0))
+
+    def _refresh_filter_bar_layout(self) -> None:
+        width = self.filter_bar.winfo_width()
+        if width <= 1:
+            return
+
+        class _ResizeEvent:
+            def __init__(self, width: int) -> None:
+                self.width = width
+
+        self._on_filter_bar_resize(_ResizeEvent(width))
+
+    def _on_filter_bar_resize(self, event: tk.Event) -> None:
+        for column in range(9):
+            self.filter_bar.columnconfigure(column, weight=0)
+
+        if event.width < 760:
+            self.search_label.grid_configure(row=0, column=0, padx=(0, 8), pady=2, sticky=tk.W)
+            self.search_entry.grid_configure(row=0, column=1, columnspan=3, padx=(0, 0), pady=2, sticky="ew")
+            self.status_label.grid_configure(row=1, column=0, padx=(0, 8), pady=2, sticky=tk.W)
+            self.status_filter.grid_configure(row=1, column=1, padx=(0, 12), pady=2, sticky=tk.W)
+            self.type_label.grid_configure(row=1, column=2, padx=(0, 8), pady=2, sticky=tk.W)
+            self.type_filter.grid_configure(row=1, column=3, padx=(0, 0), pady=2, sticky="ew")
+            self.unknown_only_check.grid_configure(row=2, column=0, columnspan=2, padx=(0, 12), pady=(4, 2), sticky=tk.W)
+            self.clear_filters_btn.grid_configure(row=2, column=2, columnspan=2, padx=(0, 0), pady=(4, 2), sticky=tk.W)
+            self.filter_summary_label.grid_configure(row=3, column=0, columnspan=4, padx=(0, 0), pady=(4, 0), sticky=tk.W)
+            self.filter_bar.columnconfigure(1, weight=1)
+            self.filter_bar.columnconfigure(3, weight=1)
+        elif event.width < 1120:
+            self.search_label.grid_configure(row=0, column=0, padx=(0, 8), pady=2, sticky=tk.W)
+            self.search_entry.grid_configure(row=0, column=1, columnspan=3, padx=(0, 18), pady=2, sticky="ew")
+            self.status_label.grid_configure(row=0, column=4, padx=(0, 8), pady=2, sticky=tk.W)
+            self.status_filter.grid_configure(row=0, column=5, padx=(0, 0), pady=2, sticky=tk.W)
+            self.type_label.grid_configure(row=1, column=0, padx=(0, 8), pady=(4, 2), sticky=tk.W)
+            self.type_filter.grid_configure(row=1, column=1, columnspan=2, padx=(0, 18), pady=(4, 2), sticky="ew")
+            self.unknown_only_check.grid_configure(row=1, column=3, columnspan=2, padx=(0, 18), pady=(4, 2), sticky=tk.W)
+            self.clear_filters_btn.grid_configure(row=1, column=5, padx=(0, 0), pady=(4, 2), sticky=tk.W)
+            self.filter_summary_label.grid_configure(row=2, column=0, columnspan=6, padx=(0, 0), pady=(4, 0), sticky=tk.W)
+            self.filter_bar.columnconfigure(1, weight=1)
+            self.filter_bar.columnconfigure(2, weight=1)
+        else:
+            self.search_label.grid_configure(row=0, column=0, padx=(0, 8), pady=2, sticky=tk.W)
+            self.search_entry.grid_configure(row=0, column=1, columnspan=1, padx=(0, 0), pady=2, sticky=tk.W)
+            self.status_label.grid_configure(row=0, column=2, padx=(18, 8), pady=2, sticky=tk.W)
+            self.status_filter.grid_configure(row=0, column=3, padx=(0, 0), pady=2, sticky=tk.W)
+            self.type_label.grid_configure(row=0, column=4, padx=(18, 8), pady=2, sticky=tk.W)
+            self.type_filter.grid_configure(row=0, column=5, columnspan=1, padx=(0, 0), pady=2, sticky=tk.W)
+            self.unknown_only_check.grid_configure(row=0, column=6, columnspan=1, padx=(18, 8), pady=2, sticky=tk.W)
+            self.clear_filters_btn.grid_configure(row=0, column=7, columnspan=1, padx=(0, 0), pady=2, sticky=tk.W)
+            self.filter_summary_label.grid_configure(row=0, column=8, columnspan=1, padx=(18, 0), pady=2, sticky=tk.E)
+            self.filter_bar.columnconfigure(8, weight=1)
 
     def _refresh_action_buttons(self) -> None:
         for widget in (
@@ -372,6 +574,325 @@ class ScannerApp:
         self.export_btn.pack(side=tk.LEFT)
         self.nickname_btn.pack(side=tk.LEFT, padx=(6, 0))
         self.map_btn.pack(side=tk.LEFT, padx=(6, 0))
+
+    @staticmethod
+    def _row_to_dict(row: DeviceRow) -> Dict[str, str]:
+        return {
+            "ip": row.ip,
+            "mac": row.mac,
+            "nickname": row.nickname,
+            "hostname": row.hostname,
+            "ping_ms": row.ping_ms,
+            "open_ports": row.open_ports,
+            "device_type": row.device_type,
+            "status": row.status,
+        }
+
+    @staticmethod
+    def _timestamp_now() -> str:
+        return datetime.now().astimezone().isoformat(timespec="seconds")
+
+    def _snapshot_identity(self, row: DeviceRow) -> str:
+        mac = self._normalize_mac(row.mac)
+        return mac if mac else f"ip:{row.ip}"
+
+    def _snapshot_label(self, row: DeviceRow) -> str:
+        return row.nickname or row.hostname or row.ip
+
+    def _visible_rows(self) -> List[DeviceRow]:
+        rows: List[DeviceRow] = []
+        for ip in self.tree.get_children():
+            row = self.results.get(ip)
+            if row:
+                rows.append(row)
+        return rows
+
+    def _refresh_type_filter_options(self) -> None:
+        types = sorted({row.device_type for row in self.results.values() if row.device_type})
+        values = ["All", *types]
+        self.type_filter.configure(values=values)
+        if self.type_filter_var.get() not in values:
+            self.type_filter_var.set("All")
+
+    def _matches_filters(self, row: DeviceRow) -> bool:
+        search = self.search_var.get().strip().lower()
+        status_filter = self.status_filter_var.get()
+        type_filter = self.type_filter_var.get()
+        unknown_only = self.unknown_only_var.get()
+
+        if status_filter != "All" and row.status != status_filter:
+            return False
+        if type_filter != "All" and row.device_type != type_filter:
+            return False
+        if unknown_only and row.device_type != "Unknown":
+            return False
+
+        if search:
+            haystack = " ".join(
+                (
+                    row.ip,
+                    row.mac,
+                    row.nickname,
+                    row.hostname,
+                    row.device_type,
+                    row.open_ports,
+                    row.status,
+                )
+            ).lower()
+            if search not in haystack:
+                return False
+
+        return True
+
+    def _apply_filters_to_tree(self) -> None:
+        visible_ips: List[str] = []
+        for ip in sorted(self.results.keys(), key=self._ip_key):
+            row = self.results[ip]
+            if self._matches_filters(row):
+                visible_ips.append(ip)
+            elif self.tree.exists(ip):
+                self.tree.detach(ip)
+
+        for idx, ip in enumerate(visible_ips):
+            if self.tree.exists(ip):
+                self.tree.move(ip, "", idx)
+                base_tag = "even" if (idx + 1) % 2 == 0 else "odd"
+                self.row_base_tag[ip] = base_tag
+                if not self._is_special_tag_active(ip):
+                    self.tree.item(ip, tags=(base_tag,))
+
+        self.filter_summary_var.set(f"Showing {len(visible_ips)} of {len(self.results)} devices")
+
+    def _clear_filters(self) -> None:
+        self.search_var.set("")
+        self.status_filter_var.set("All")
+        self.type_filter_var.set("All")
+        self.unknown_only_var.set(False)
+        self._apply_filters_to_tree()
+
+    def _record_snapshot(self, source: str, rows: Dict[str, DeviceRow]) -> None:
+        timestamp = self._timestamp_now()
+        ordered_rows = [rows[ip] for ip in sorted(rows.keys(), key=self._ip_key)]
+        self.snapshot_history.append(
+            {
+                "timestamp": timestamp,
+                "source": source,
+                "network": self.network_var.get().strip(),
+                "device_count": len(ordered_rows),
+                "devices": [self._row_to_dict(row) for row in ordered_rows],
+            }
+        )
+
+        previous = {self._snapshot_identity(row): row for row in self.last_snapshot_rows.values()}
+        current = {self._snapshot_identity(row): row for row in ordered_rows}
+
+        for identity, row in current.items():
+            previous_row = previous.get(identity)
+            if previous_row is None:
+                self.change_history.append(
+                    {
+                        "timestamp": timestamp,
+                        "type": "device_appeared",
+                        "source": source,
+                        "label": self._snapshot_label(row),
+                        "ip": row.ip,
+                        "mac": row.mac,
+                        "details": "",
+                    }
+                )
+                continue
+
+            if previous_row.ip != row.ip:
+                self.change_history.append(
+                    {
+                        "timestamp": timestamp,
+                        "type": "ip_changed",
+                        "source": source,
+                        "label": self._snapshot_label(row),
+                        "ip": row.ip,
+                        "mac": row.mac,
+                        "details": f"{previous_row.ip} -> {row.ip}",
+                    }
+                )
+            if previous_row.open_ports != row.open_ports:
+                self.change_history.append(
+                    {
+                        "timestamp": timestamp,
+                        "type": "ports_changed",
+                        "source": source,
+                        "label": self._snapshot_label(row),
+                        "ip": row.ip,
+                        "mac": row.mac,
+                        "details": f"{previous_row.open_ports or '-'} -> {row.open_ports or '-'}",
+                    }
+                )
+            if previous_row.hostname != row.hostname:
+                self.change_history.append(
+                    {
+                        "timestamp": timestamp,
+                        "type": "hostname_changed",
+                        "source": source,
+                        "label": self._snapshot_label(row),
+                        "ip": row.ip,
+                        "mac": row.mac,
+                        "details": f"{previous_row.hostname or '-'} -> {row.hostname or '-'}",
+                    }
+                )
+            if previous_row.device_type != row.device_type:
+                self.change_history.append(
+                    {
+                        "timestamp": timestamp,
+                        "type": "device_type_changed",
+                        "source": source,
+                        "label": self._snapshot_label(row),
+                        "ip": row.ip,
+                        "mac": row.mac,
+                        "details": f"{previous_row.device_type or '-'} -> {row.device_type or '-'}",
+                    }
+                )
+
+        for identity, row in previous.items():
+            if identity not in current:
+                self.change_history.append(
+                    {
+                        "timestamp": timestamp,
+                        "type": "device_disappeared",
+                        "source": source,
+                        "label": self._snapshot_label(row),
+                        "ip": row.ip,
+                        "mac": row.mac,
+                        "details": "",
+                    }
+                )
+
+        self.last_snapshot_rows = {row.ip: row for row in ordered_rows}
+        self.last_snapshot_source = source
+
+    def _write_rows_csv(self, path: str, rows: List[DeviceRow]) -> None:
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=["ip", "mac", "nickname", "hostname", "ping_ms", "open_ports", "device_type", "status"],
+            )
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(self._row_to_dict(row))
+
+    def _export_current_csv(self) -> None:
+        rows = self._visible_rows()
+        if not rows:
+            messagebox.showinfo("Export", "No visible rows to export.")
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Export visible results to CSV",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        self._write_rows_csv(path, rows)
+        self.status_var.set(f"Exported visible CSV: {path}")
+
+    def _export_current_json(self) -> None:
+        rows = self._visible_rows()
+        if not rows:
+            messagebox.showinfo("Export", "No visible rows to export.")
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Export visible results to JSON",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        payload = {
+            "exported_at": self._timestamp_now(),
+            "network": self.network_var.get().strip(),
+            "filters": {
+                "search": self.search_var.get(),
+                "status": self.status_filter_var.get(),
+                "device_type": self.type_filter_var.get(),
+                "unknown_only": self.unknown_only_var.get(),
+            },
+            "device_count": len(rows),
+            "devices": [self._row_to_dict(row) for row in rows],
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        self.status_var.set(f"Exported visible JSON: {path}")
+
+    def _export_history_json(self) -> None:
+        if not self.snapshot_history and not self.change_history:
+            messagebox.showinfo("Export", "No history collected yet.")
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Export history to JSON",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        payload = {
+            "exported_at": self._timestamp_now(),
+            "network": self.network_var.get().strip(),
+            "snapshot_count": len(self.snapshot_history),
+            "change_count": len(self.change_history),
+            "snapshots": self.snapshot_history,
+            "changes": self.change_history,
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        self.status_var.set(f"Exported history JSON: {path}")
+
+    def _export_history_csv(self) -> None:
+        if not self.change_history:
+            messagebox.showinfo("Export", "No change history collected yet.")
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Export history changes to CSV",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=["timestamp", "type", "source", "label", "ip", "mac", "details"],
+            )
+            writer.writeheader()
+            for entry in self.change_history:
+                writer.writerow(entry)
+        self.status_var.set(f"Exported history CSV: {path}")
+
+    def show_export_menu(self) -> None:
+        if not self.results and not self.snapshot_history and not self.change_history:
+            return
+
+        if self.export_menu is not None:
+            self.export_menu.destroy()
+
+        self.export_menu = tk.Menu(self.root, tearoff=0)
+        self.export_menu.add_command(label="Visible Table -> CSV", command=self._export_current_csv)
+        self.export_menu.add_command(label="Visible Table -> JSON", command=self._export_current_json)
+        self.export_menu.add_separator()
+        self.export_menu.add_command(label="History -> JSON", command=self._export_history_json)
+        self.export_menu.add_command(label="History Changes -> CSV", command=self._export_history_csv)
+
+        x = self.export_btn.winfo_rootx()
+        y = self.export_btn.winfo_rooty() + self.export_btn.winfo_height()
+        try:
+            self.export_menu.tk_popup(x, y)
+        finally:
+            self.export_menu.grab_release()
 
     @staticmethod
     def _normalize_mac(mac: str) -> str:
@@ -440,6 +961,7 @@ class ScannerApp:
             if self._normalize_mac(dev.mac) == mac_key:
                 dev.nickname = alias
                 self._set_row_values(row_ip, dev)
+        self._apply_filters_to_tree()
         self._render_map()
 
     def set_selected_nickname(self) -> None:
@@ -759,6 +1281,8 @@ class ScannerApp:
             self.row_base_tag.pop(ip, None)
             self.remove_tokens.pop(ip, None)
             self.highlight_tokens.pop(ip, None)
+            self._refresh_type_filter_options()
+            self._apply_filters_to_tree()
             return
 
         sr, sg, sb = self._hex_to_rgb(start_color)
@@ -825,6 +1349,9 @@ class ScannerApp:
                     values=(row.status, row.ip, row.mac, row.nickname, row.hostname, row.ping_ms, row.open_ports, row.device_type),
                     tags=("odd",),
                 )
+
+        self._refresh_type_filter_options()
+        self._apply_filters_to_tree()
 
         visible_ips = sorted((ip for ip in self.tree.get_children() if ip in current_ips), key=self._ip_key)
         for idx, ip in enumerate(visible_ips, start=1):
@@ -958,40 +1485,6 @@ class ScannerApp:
         if self.live_running:
             self.live_stop_event.set()
             self.status_var.set("Stopping live scanner...")
-
-    def export_csv(self) -> None:
-        if not self.results:
-            return
-
-        path = filedialog.asksaveasfilename(
-            title="Export results",
-            defaultextension=".csv",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-        )
-        if not path:
-            return
-
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(
-                f,
-                fieldnames=["ip", "mac", "nickname", "hostname", "ping_ms", "open_ports", "device_type", "status"],
-            )
-            writer.writeheader()
-            for row in sorted(self.results.values(), key=lambda d: tuple(int(p) for p in d.ip.split("."))):
-                writer.writerow(
-                    {
-                        "ip": row.ip,
-                        "mac": row.mac,
-                        "nickname": row.nickname,
-                        "hostname": row.hostname,
-                        "ping_ms": row.ping_ms,
-                        "open_ports": row.open_ports,
-                        "device_type": row.device_type,
-                        "status": row.status,
-                    }
-                )
-
-        self.status_var.set(f"Exported: {path}")
 
     def _scan_worker(self, network: str, timeout_ms: int, workers: int) -> None:
         started = time.time()
@@ -1183,6 +1676,8 @@ class ScannerApp:
                     values=(row.status, row.ip, row.mac, row.nickname, row.hostname, row.ping_ms, row.open_ports, row.device_type),
                     tags=(tag,),
                 )
+                self._refresh_type_filter_options()
+                self._apply_filters_to_tree()
             elif kind == "row_update":
                 ip, mac, hostname, open_ports, device_type = event[1], event[2], event[3], event[4], event[5]
                 if ip in self.results:
@@ -1196,17 +1691,22 @@ class ScannerApp:
                         ip,
                         values=(row.status, row.ip, row.mac, row.nickname, row.hostname, row.ping_ms, row.open_ports, row.device_type),
                     )
+                    self._refresh_type_filter_options()
+                    self._apply_filters_to_tree()
                     self._render_map()
             elif kind == "scan_done":
                 elapsed, stopped = event[1], event[2]
                 if not stopped:
                     self.progress.configure(value=100)
+                    self._record_snapshot("scan", self.results)
                 self.scan_running = False
                 self.scan_btn.configure(state=tk.NORMAL)
                 self.stop_btn.configure(state=tk.DISABLED)
                 self.live_btn.configure(state=tk.NORMAL)
                 self.export_btn.configure(state=tk.NORMAL if self.results else tk.DISABLED)
                 self._refresh_action_buttons()
+                self._refresh_type_filter_options()
+                self._apply_filters_to_tree()
                 if stopped:
                     self.status_var.set(f"Stopped. Found {len(self.results)} active hosts in {elapsed:.2f}s")
                 else:
@@ -1214,6 +1714,7 @@ class ScannerApp:
                 self._render_map()
             elif kind == "live_cycle":
                 rows, new_ips = event[1], event[2]
+                self._record_snapshot("live", rows)
                 self._sync_live_table(rows, new_ips)
                 self.progress.configure(value=100)
                 self.export_btn.configure(state=tk.NORMAL if self.results else tk.DISABLED)
@@ -1230,11 +1731,16 @@ class ScannerApp:
                 self.stop_btn.configure(state=tk.DISABLED)
                 self._refresh_action_buttons()
                 self.status_var.set("Live scanner stoppet.")
+                self._refresh_type_filter_options()
+                self._apply_filters_to_tree()
                 self._render_map()
 
         self.root.after(100, self._process_ui_queue)
 
     def _clear_table(self) -> None:
+        for iid in list(self.results.keys()):
+            if self.tree.exists(iid):
+                self.tree.delete(iid)
         self.results.clear()
         self.live_detail_cache.clear()
         self.row_base_tag.clear()
@@ -1242,9 +1748,9 @@ class ScannerApp:
         self.remove_tokens.clear()
         self.map_positions.clear()
         self.map_drag_key = None
-        for iid in self.tree.get_children():
-            self.tree.delete(iid)
         self.progress.configure(maximum=100, value=0)
+        self._refresh_type_filter_options()
+        self._apply_filters_to_tree()
         self._render_map()
 
 
